@@ -1,0 +1,164 @@
+name: GitOps CD Pipeline - ArgoCD Sync
+
+on:
+  push:
+    tags:
+      - 'v*'  # Triggers on version tags like v1.0.0, v1.2.3, etc.
+  workflow_dispatch:  # Allow manual triggering
+    inputs:
+      tag:
+        description: 'Tag to sync (e.g., v1.0.0)'
+        required: true
+        default: 'latest'
+
+env:
+  ARGOCD_SERVER: argocd.local
+  ARGOCD_NAMESPACE: argocd
+  APP_NAME: flask-app-production
+
+jobs:
+  argocd-sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+    - name: Checkout GitOps repo
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Extract tag version
+      id: extract_tag
+      run: |
+        # Get the tag that triggered the workflow
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "TAG_VERSION=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+        else
+          echo "TAG_VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        fi
+        echo "Extracted tag: $TAG_VERSION"
+    
+    - name: Set up Kubernetes context
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+    
+    - name: Install ArgoCD CLI
+      run: |
+        curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+        sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+        rm argocd-linux-amd64
+        argocd version --client
+    
+    - name: Configure Kubernetes context
+      run: |
+        # For Kind cluster - update with your context name
+        kubectl config set-cluster kind-gitops-demo --server=https://kubernetes.default.svc
+        kubectl config set-context kind-gitops-demo --cluster=kind-gitops-demo --user=kind-gitops-demo
+        kubectl config use-context kind-gitops-demo
+        
+        # Verify connection
+        kubectl cluster-info
+        kubectl get nodes
+    
+    - name: Login to ArgoCD
+      run: |
+        # Get ArgoCD admin password
+        ARGOCD_PASSWORD=$(kubectl -n $ARGOCD_NAMESPACE get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)
+        
+        # Login to ArgoCD
+        argocd login $ARGOCD_SERVER --username admin --password $ARGOCD_PASSWORD --insecure
+        
+        # Verify login
+        argocd app list
+    
+    - name: Update image tag in manifests
+      run: |
+        TAG_VERSION=${{ steps.extract_tag.outputs.TAG_VERSION }}
+        
+        # Update image tag in production overlay
+        cd overlays/production
+        
+        # Use yq for YAML manipulation (install if not present)
+        if ! command -v yq &> /dev/null; then
+          sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          sudo chmod +x /usr/local/bin/yq
+        fi
+        
+        # Update the image tag
+        yq eval ".images[0].newTag = \"$TAG_VERSION\"" -i kustomization.yaml
+        
+        # Display changes for verification
+        echo "Updated kustomization.yaml:"
+        cat kustomization.yaml
+        
+        # Commit changes back to repo (optional - if you want to track tag changes)
+        git config user.name "github-actions"
+        git config user.email "github-actions@github.com"
+        git add kustomization.yaml
+        git commit -m "CD: Update image tag to $TAG_VERSION" || echo "No changes to commit"
+        git push origin main
+    
+    - name: Sync ArgoCD application
+      run: |
+        TAG_VERSION=${{ steps.extract_tag.outputs.TAG_VERSION }}
+        
+        echo "Syncing ArgoCD application $APP_NAME with tag: $TAG_VERSION"
+        
+        # Sync the application
+        argocd app sync $APP_NAME --prune --force
+        
+        # Wait for sync to complete
+        argocd app wait $APP_NAME --healthy --timeout 300
+        
+        # Get application status
+        echo "Application status:"
+        argocd app get $APP_NAME
+    
+    - name: Verify deployment
+      run: |
+        echo "Verifying deployment in production namespace..."
+        
+        # Check deployment status
+        kubectl -n production get deployments
+        kubectl -n production get pods
+        
+        # Wait for pods to be ready
+        kubectl -n production wait --for=condition=available deployment/flask-app --timeout=300s
+        
+        # Verify health endpoint (if port-forwarding is available)
+        echo "Deployment verification completed successfully"
+    
+    - name: Send notification
+      if: success()
+      run: |
+        echo "🚀 Deployment successful! Tag ${{ steps.extract_tag.outputs.TAG_VERSION }} is now live in production"
+        # Add Slack/Teams notification here if desired
+        # Example: curl -X POST -H 'Content-type: application/json' --data '{"text":"Deployment successful!"}' $SLACK_WEBHOOK
+
+  manual-rollback:
+    runs-on: ubuntu-latest
+    needs: argocd-sync
+    if: failure()
+    
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+    
+    - name: Install ArgoCD CLI
+      run: |
+        curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+        sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+    
+    - name: Rollback to previous version
+      run: |
+        # Login to ArgoCD (similar to previous steps)
+        ARGOCD_PASSWORD=$(kubectl -n $ARGOCD_NAMESPACE get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)
+        argocd login $ARGOCD_SERVER --username admin --password $ARGOCD_PASSWORD --insecure
+        
+        # Rollback to previous version
+        argocd app rollback $APP_NAME
+        
+        echo "Rollback initiated due to deployment failure"
