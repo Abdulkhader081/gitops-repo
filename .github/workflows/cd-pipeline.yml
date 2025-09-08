@@ -2,8 +2,8 @@ name: GitOps CD Pipeline - ArgoCD Sync
 
 on:
   push:
-    tags:
-      - 'v*'  # Triggers on version tags like v1.0.0, v1.2.3, etc.
+    branches: [ main ]
+    tags: [ 'v*' ]  # Triggers on version tags like v1.0.0, v1.2.3, etc.
   workflow_dispatch:  # Allow manual triggering
     inputs:
       tag:
@@ -24,10 +24,11 @@ jobs:
       id-token: write
     
     steps:
-    - name: Checkout GitOps repo
+    - name: Checkout current repo (with tags)
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        ref: ${{ github.ref }}
     
     - name: Extract tag version
       id: extract_tag
@@ -54,10 +55,10 @@ jobs:
     
     - name: Configure Kubernetes context
       run: |
-        # For Kind cluster - update with your context name
-        kubectl config set-cluster kind-gitops-demo --server=https://kubernetes.default.svc
-        kubectl config set-context kind-gitops-demo --cluster=kind-gitops-demo --user=kind-gitops-demo
-        kubectl config use-context kind-gitops-demo
+        # Set up kubeconfig (update with your cluster configuration)
+        mkdir -p ~/.kube
+        echo '${{ secrets.KUBECONFIG }}' > ~/.kube/config
+        kubectl config use-context ${{ secrets.CLUSTER_CONTEXT }}
         
         # Verify connection
         kubectl cluster-info
@@ -74,14 +75,27 @@ jobs:
         # Verify login
         argocd app list
     
-    - name: Update image tag in manifests
+    - name: Update GitOps repository with new tag
+      env:
+        GITOPS_REPO: ${{ secrets.GITOPS_REPO }}
+        GITOPS_SSH_KEY: ${{ secrets.GITOPS_SSH_KEY }}
       run: |
         TAG_VERSION=${{ steps.extract_tag.outputs.TAG_VERSION }}
+        
+        # Configure git with deploy key
+        mkdir -p ~/.ssh
+        echo "$GITOPS_SSH_KEY" > ~/.ssh/gitops_key
+        chmod 600 ~/.ssh/gitops_key
+        echo -e "Host github.com\n  IdentityFile ~/.ssh/gitops_key\n  IdentitiesOnly yes" > ~/.ssh/config
+        
+        # Clone the GitOps repository
+        git clone git@github.com:$GITOPS_REPO.git gitops-repo
+        cd gitops-repo
         
         # Update image tag in production overlay
         cd overlays/production
         
-        # Use yq for YAML manipulation (install if not present)
+        # Install yq if not present
         if ! command -v yq &> /dev/null; then
           sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           sudo chmod +x /usr/local/bin/yq
@@ -94,12 +108,14 @@ jobs:
         echo "Updated kustomization.yaml:"
         cat kustomization.yaml
         
-        # Commit changes back to repo (optional - if you want to track tag changes)
+        # Commit and push changes
         git config user.name "github-actions"
         git config user.email "github-actions@github.com"
         git add kustomization.yaml
-        git commit -m "CD: Update image tag to $TAG_VERSION" || echo "No changes to commit"
+        git commit -m "CD: Update image tag to $TAG_VERSION"
         git push origin main
+        
+        echo "✅ GitOps repository updated with new tag: $TAG_VERSION"
     
     - name: Sync ArgoCD application
       run: |
@@ -108,7 +124,7 @@ jobs:
         echo "Syncing ArgoCD application $APP_NAME with tag: $TAG_VERSION"
         
         # Sync the application
-        argocd app sync $APP_NAME --prune --force
+        argocd app sync $APP_NAME --prune
         
         # Wait for sync to complete
         argocd app wait $APP_NAME --healthy --timeout 300
@@ -128,15 +144,13 @@ jobs:
         # Wait for pods to be ready
         kubectl -n production wait --for=condition=available deployment/flask-app --timeout=300s
         
-        # Verify health endpoint (if port-forwarding is available)
         echo "Deployment verification completed successfully"
     
     - name: Send notification
       if: success()
       run: |
         echo "🚀 Deployment successful! Tag ${{ steps.extract_tag.outputs.TAG_VERSION }} is now live in production"
-        # Add Slack/Teams notification here if desired
-        # Example: curl -X POST -H 'Content-type: application/json' --data '{"text":"Deployment successful!"}' $SLACK_WEBHOOK
+        # Add notification integration here if desired
 
   manual-rollback:
     runs-on: ubuntu-latest
@@ -144,17 +158,20 @@ jobs:
     if: failure()
     
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4
-    
     - name: Install ArgoCD CLI
       run: |
         curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
         sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
     
+    - name: Configure Kubernetes context
+      run: |
+        mkdir -p ~/.kube
+        echo '${{ secrets.KUBECONFIG }}' > ~/.kube/config
+        kubectl config use-context ${{ secrets.CLUSTER_CONTEXT }}
+    
     - name: Rollback to previous version
       run: |
-        # Login to ArgoCD (similar to previous steps)
+        # Login to ArgoCD
         ARGOCD_PASSWORD=$(kubectl -n $ARGOCD_NAMESPACE get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)
         argocd login $ARGOCD_SERVER --username admin --password $ARGOCD_PASSWORD --insecure
         
