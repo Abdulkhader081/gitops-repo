@@ -2,7 +2,8 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: production
 resources:
-- ../../base
+  - ../../base
 images:
-- name: your-docker-username/flask-app
-  newTag: latest
+  - name: your-docker-username/flask-app
+    newTag: 66e72c8cc4b85256faf6364c129a7b047eb5e16f
+    newName: abdulkhadermd13/flask-app
