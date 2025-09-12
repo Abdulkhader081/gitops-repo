@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: flask-app
-        image: your-docker-username/flask-app
+        image: abdulkhadermd13/flask-app
         ports:
         - containerPort: 5000
         livenessProbe:
@@ -41,4 +41,4 @@ spec:
     - protocol: TCP
       port: 80
       targetPort: 5000
-  type: ClusterIP
+  type: NodePort
