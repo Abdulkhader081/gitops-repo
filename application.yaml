@@ -6,12 +6,12 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/your-username/gitops-repo
-    targetRevision: HEAD
-    path: overlays/production
+    repoURL: https://github.com/yourorg/gitops-repo
+    targetRevision: main
+    path: .
   destination:
     server: https://kubernetes.default.svc
-    namespace: production
+    namespace: default
   syncPolicy:
     automated:
       selfHeal: true
