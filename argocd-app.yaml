@@ -6,7 +6,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/yourorg/gitops-repo
+    repoURL: 'https://github.com/yourorg/gitops-repo.git'
     targetRevision: main
     path: .
   destination:
